@@ -18,6 +18,12 @@ services:
     environment:
       UPSTREAM_URL: http://upstream:8081
       REDIS_ADDR: redis:6379
-      CACHE_ENABLED: "true"
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
     ports: ["8080:8080"]
     depends_on: [redis, upstream]
+
+  bench:
+    build: .
+    profiles: ["bench"]
+    entrypoint: ["bench", "-api", "http://api:8080", "-upstream", "http://upstream:8081"]
+    command: ["-n", "2000", "-c", "50", "-keys", "500"]
