@@ -39,21 +39,58 @@ flowchart LR
     API -->|3. SET with TTL| Redis
 ```
 
+### Layered design
+
+The code follows a **layered architecture**: each layer has one job and depends only on the layer below it, through **interfaces**. That makes every layer testable in isolation and lets the cache or the CRM client be swapped without touching business rules.
+
+```mermaid
+flowchart TB
+    R[Router] --> H[Handler<br/><i>HTTP: params, status codes</i>]
+    H --> U[Use case<br/><i>validation, DTO mapping</i>]
+    U --> S[Service<br/><i>business rules: cache-aside, singleflight, logging</i>]
+    S --> C[(Cache repository<br/>Redis)]
+    S --> I[Integration repository<br/>External CRM API]
+```
+
+| Layer | Responsibility | Knows about |
+|---|---|---|
+| **Router** | Maps routes to handlers | Handlers |
+| **Handler** | Reads HTTP input, translates domain errors into status codes (400 / 404 / 502) | Use case interface, DTOs |
+| **Use case** | Validates input, orchestrates the workflow, maps the domain model to the response DTO | Service interface |
+| **Service** | Business rules: cache-aside, singleflight, graceful degradation, structured logs | Repository interfaces, domain model |
+| **Repositories** | Talk to the outside world: Redis (`cache`) and the CRM API (`integration`) | Infrastructure only |
+
+Interfaces are declared **where they are consumed** (the service declares `ContactCache` and `ContactProvider`), the idiomatic Go approach that keeps dependencies pointing inward.
+
 ```
 cmd/
-  api/        HTTP API (cache-aside + singleflight)
-  upstream/   simulated slow, metered external API
-  bench/      load generator: latency percentiles + upstream call count
+  api/            composition root: wires dependencies, no business logic
+  upstream/       simulated slow, metered external CRM
+  bench/          load generator: latency percentiles + upstream call count
 internal/
-  contacts/   domain + service (the core logic, fully unit-tested)
-  cache/      Cache interface + Redis implementation
-  upstream/   HTTP client for the external API
-  metrics/    lock-free counters exposed at /metrics
+  app/contact/
+    controller/
+      router.go   route registration
+      handler/    HTTP handlers
+      usecase/    application workflows (GetContact)
+      dto/        request/response contracts
+    domain/
+      model/      Contact entity + domain errors
+      service/    business rules + logging
+    repository/
+      cache/        Redis repository (key naming, serialization, TTL)
+      integration/  HTTP client for the external CRM
+  crosscutting/
+    config/       env-based configuration (12-factor)
+    logger/       structured JSON logging (log/slog)
+    metrics/      lock-free counters exposed at /metrics
+    httpx/        shared HTTP helpers
 ```
 
 ## 🧰 Tech stack
 
-- **Go 1.24** — `net/http` (method-based routing), `log/slog`, `sync/atomic`
+- **Go 1.24** — `net/http` (method-based routing), `log/slog` (structured logs), `sync/atomic`
+- **Layered architecture** — router → handler → use case → service → repository
 - **Redis 7** with [`go-redis/v9`](https://github.com/redis/go-redis)
 - **golang.org/x/sync/singleflight** — request coalescing
 - **Docker / Docker Compose**
@@ -172,7 +209,14 @@ Example: `docker compose run --rm bench -n 5000 -c 100 -keys 1000`
 go test -race ./...
 ```
 
-Includes a **cache stampede test**: 100 concurrent requests for the same missing key must result in **exactly 1** call to the external API.
+Each layer is tested in isolation with fakes:
+
+| Layer | What is tested |
+|---|---|
+| Handler | Domain errors → HTTP status codes (200 / 400 / 404 / 502) |
+| Use case | Input validation (rejects ids like `../etc/passwd`), DTO mapping |
+| Service | Cache hit/miss, **cache stampede** (100 concurrent misses → exactly 1 external call), Redis down → graceful fallback, errors never cached |
+| Cache repository | Integration test against a real Redis (skipped automatically if Redis is not running) |
 
 ### Endpoints
 
@@ -189,6 +233,8 @@ Includes a **cache stampede test**: 100 concurrent requests for the same missing
 | `CACHE_ENABLED` | `true` | Turn the Redis cache on/off |
 | `REDIS_ADDR` | `localhost:6379` | Redis address |
 | `UPSTREAM_URL` | `http://localhost:8081` | External API base URL |
+| `CACHE_TTL` | `5m` | How long a contact stays cached |
+| `LOG_LEVEL` | `info` | `debug` shows every cache hit/miss |
 | `UPSTREAM_LATENCY` | `1500ms` | Simulated latency of the external API |
 | `UPSTREAM_JITTER` | `300ms` | Random extra latency |
 

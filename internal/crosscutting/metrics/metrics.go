@@ -1,4 +1,4 @@
-// Package metrics holds lightweight, lock-free counters exposed by the API.
+// Package metrics holds lightweight, lock-free counters exposed at /metrics.
 package metrics
 
 import "sync/atomic"
