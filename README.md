@@ -74,40 +74,123 @@ Benchmark: **2,000 requests, 50 concurrent clients, 500 distinct contacts** foll
 - 🛡️ `singleflight` coalesced **201 concurrent requests** that would otherwise have hit the external API at the same time.
 - 📈 Throughput went **from 30 to ~150 req/s** cold, and over **15k req/s** warm.
 
-> Numbers measured on a single Linux machine with Redis running locally. Your numbers will vary — run `make bench` and see for yourself.
+> Numbers measured on a single Linux machine with Redis running locally. Your numbers will vary — see [How to run locally](#️-how-to-run-locally) and try it yourself.
 
 ## ▶️ How to run locally
 
-**With Docker (recommended)**
+You can test everything in about 2 minutes. Pick **one** of the options below.
+
+### Prerequisites
+
+| Option | You need |
+|---|---|
+| A — Docker only (easiest) | [Docker](https://docs.docker.com/get-docker/) with Docker Compose |
+| B — Go + Docker | Docker + [Go 1.24+](https://go.dev/dl/) |
+| C — No Docker | Go 1.24+ and a local [Redis](https://redis.io/docs/latest/operate/oss_and_stack/install/) on port `6379` |
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/victorhisamitsu/go-redis-cache-benchmark.git
+cd go-redis-cache-benchmark
+```
+
+### Option A — Docker only (no Go installation needed)
+
+**Start the stack** (Redis + simulated external API + Go API):
+
+```bash
+docker compose up -d --build
+```
+
+**Check that it works** — the first call takes ~1.5s (cache miss), the second one is instant (cache hit):
+
+```bash
+curl localhost:8080/contacts/42
+curl localhost:8080/contacts/42
+```
+
+**Run the benchmark with the cache ON:**
+
+```bash
+docker compose run --rm bench
+```
+
+**Now compare with the cache OFF:**
+
+```bash
+CACHE_ENABLED=false docker compose up -d api
+docker compose run --rm bench
+```
+
+> On Windows PowerShell, use `$env:CACHE_ENABLED="false"; docker compose up -d api` instead.
+
+**See the counters** (hits, misses, hit ratio, upstream calls, coalesced requests):
+
+```bash
+curl localhost:8080/metrics
+```
+
+**Stop everything:**
+
+```bash
+docker compose down
+```
+
+### Option B — Go + Docker
 
 ```bash
 docker compose up -d --build
 go run ./cmd/bench -n 2000 -c 50 -keys 500
-curl localhost:8080/metrics
 ```
 
-**Without Docker** (needs a local Redis on `:6379`)
+### Option C — Without Docker
+
+Start Redis locally, then run each service in its own terminal:
 
 ```bash
-make build
-./bin/upstream &
-./bin/api -cache=true &      # use -cache=false to compare
-./bin/bench -n 2000 -c 50 -keys 500
+go run ./cmd/upstream                  # terminal 1 — simulated external API on :8081
+go run ./cmd/api -cache=true           # terminal 2 — API on :8080 (use -cache=false to compare)
+go run ./cmd/bench -n 2000 -c 50       # terminal 3 — benchmark
 ```
 
-**Tests** (includes a stampede test: 100 concurrent misses → exactly 1 upstream call)
+### Benchmark options
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-n` | `2000` | total requests |
+| `-c` | `50` | concurrent clients |
+| `-keys` | `500` | distinct contact ids (Zipf distribution) |
+
+Example: `docker compose run --rm bench -n 5000 -c 100 -keys 1000`
+
+> 💡 Tip: run the benchmark **twice** with the cache ON — the first run starts with a cold cache, the second one shows the warm-cache numbers.
+
+### Run the tests
 
 ```bash
-make test
+go test -race ./...
 ```
 
-**Endpoints**
+Includes a **cache stampede test**: 100 concurrent requests for the same missing key must result in **exactly 1** call to the external API.
+
+### Endpoints
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/contacts/{id}` | Contact profile (cached) |
 | GET | `/metrics` | Hits, misses, hit ratio, upstream calls, coalesced requests |
 | GET | `/healthz` | Liveness check |
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `CACHE_ENABLED` | `true` | Turn the Redis cache on/off |
+| `REDIS_ADDR` | `localhost:6379` | Redis address |
+| `UPSTREAM_URL` | `http://localhost:8081` | External API base URL |
+| `UPSTREAM_LATENCY` | `1500ms` | Simulated latency of the external API |
+| `UPSTREAM_JITTER` | `300ms` | Random extra latency |
 
 ## ⚖️ Trade-offs and limitations
 
